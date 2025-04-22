@@ -1,13 +1,131 @@
 from ucimlrepo import fetch_ucirepo
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
+
+def initialize_centroids(X, k):
+    indices = np.random.choice(X.shape[0], k, replace=False) #Randomly pick 3 data points from the scaled features
+    return X[indices]
+
+def euclidean_distance(point1, point2):
+    squared_diff = [(p1 - p2) ** 2 for p1, p2 in zip(point1, point2)] #find euclidean distance using formula
+    return sum(squared_diff) ** 0.5 #take square root of total
+
+#Compute distance from centroids
+def compute_distances(X, centroids):
+    distances = []
+    for point in X:     ##Loop through students and their features
+        point_distances = []
+        for centroid in centroids:  ##Loop through centroids 
+            d = euclidean_distance(point, centroid)  #find distance from student to centroid
+            point_distances.append(d)      #add distance to array
+        distances.append(point_distances) #add all distances to array
+    return np.array(distances)
+
+#Assign student to a cluster
+def assign_clusters(distances):
+    return np.argmin(distances, axis=1)
+
+##Update the centroids based on clusters
+def update_centroids(X, labels, k):
+    new_centroids = []
+    for i in range(k):
+        # Check if there are points in this cluster
+        if np.sum(labels == i) == 0:
+            print(f"Warning: Cluster {i} is empty. Reinitializing centroid.")
+            new_centroids.append(X[np.random.choice(X.shape[0])])  # Randomly pick a point as the new centroid
+        else:
+            new_centroids.append(X[labels == i].mean(axis=0))  # Calculate mean of the points in the cluster
+    return np.array(new_centroids)
+
+def kmeans(X, k, max_iters=100, tol=1e-4):
+    X = np.array(X) #convert Students to numpy array to make calculations easier
+    centroids = initialize_centroids(X, k) #Create initial random centroids
+
+    for i in range(max_iters): 
+        old_centroids = centroids.copy() #Save old centroids that will be used to check if the new centroids are being changed, if same -> stop.
+
+        #Assign points to nearest centroid
+        distances = compute_distances(X, centroids)
+        labels = assign_clusters(distances)
+
+        #Update centroids based on the new points assignment
+        centroids = update_centroids(X, labels, k)
+
+        #Check for convergence
+        if np.all(np.linalg.norm(centroids - old_centroids, axis=1) < tol):
+            print(f"Converged in {i} iterations.")
+            break #break if converged
+
+    return labels, centroids
+
+##Find 
+def calculate_wcss(X, labels, centroids):
+    wcss = 0 
+    for i, point in enumerate(X): ##loop through student data features
+        center = centroids[labels[i]] ##get cluster
+        wcss += np.sum((point - center) ** 2) ##find distance 
+    return wcss
+
+def run_elbow_plot(X_scaled, k_range=range(1, 11)):
+    wcss = []
+    for k in k_range:
+        labels, centroids = kmeans(X_scaled, k)
+        score = calculate_wcss(X_scaled, labels, centroids)
+        wcss.append(score)
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(k_range, wcss, 'bo-')
+    plt.xlabel('Number of Clusters (k)')
+    plt.ylabel('WCSS')
+    plt.title('Elbow Method for Optimal k')
+    plt.grid(True)
+    plt.show()
+
+def cluster_subset(df, feature_list, subset_name, k=3):
+    print(f"\n--- {subset_name} Subset ---")
+    X_sub = df[feature_list].copy() #Grab relevant feautres
+    scaler = StandardScaler() #scale data so no features dominate
+    X_scaled = scaler.fit_transform(X_sub)
+
+    labels, centroids = kmeans(X_scaled, k) #runs k-means clustering
+    sil_score = silhouette_score(X_scaled, labels) #Find reliability of kmean model
+    print(f"Silhouette Score: {sil_score:.3f}")
+
+    cluster_col = f'{subset_name.lower()}_cluster' #set subset name neatly for printing
+    df[cluster_col] = labels #add assignment clusters to array for visualization
+
+    #print out grade for interpretation
+    if 'g3' in df.columns:
+        print("G3 by cluster:")
+        print(df.groupby(cluster_col)['g3'].mean())
+    
+    summarize_clusters(df, cluster_col, feature_list) #print statistics
+
+    # PCA plot
+    pca = PCA(n_components=2)
+    pca_result = pca.fit_transform(X_scaled)
+    df[f'{subset_name.lower()}_pca1'] = pca_result[:, 0]
+    df[f'{subset_name.lower()}_pca2'] = pca_result[:, 1]
+
+    plt.figure(figsize=(8, 5))
+    sns.scatterplot(data=df, x=f'{subset_name.lower()}_pca1', y=f'{subset_name.lower()}_pca2',
+                    hue=cluster_col, palette='Set1')
+    plt.title(f"{subset_name} Clustering (PCA)")
+    plt.xlabel("PCA 1")
+    plt.ylabel("PCA 2")
+    plt.legend(title='Cluster')
+    plt.show()
+
+def summarize_clusters(df, cluster_col, features, target='g3'):
+    summary = df.groupby(cluster_col)[features + [target]].mean()
+    print(f"\nSummary for '{cluster_col}':")
+    print(summary)
+    return summary
 
 # fetch dataset 
 student_performance = fetch_ucirepo(id=320) 
@@ -41,99 +159,29 @@ for col in binary_cols:
 nominal_cols = ['mjob', 'fjob', 'guardian', 'reason']
 df = pd.get_dummies(df, columns=[col for col in nominal_cols if col in df.columns], drop_first=True)
 
-#Create a list of all the features used for clustering.
-features = ['studytime', 'failures', 'absences',
-            'sex', 'address', 'pstatus', 'schoolsup', 'famsup',
-            'internet', 'nursery', 'higher', 'romantic', 'freetime',
-            'goout', 'walc', 'dalc'] + \
-           [col for col in df.columns if any(prefix in col for prefix in ['mjob_', 'fjob_', 'guardian_', 'reason_'])]
+academic_features = ['studytime', 'failures', 'absences']
+family_features = ['address', 'pstatus', 'famsup'] + [col for col in df.columns if col.startswith(('mjob_', 'fjob_', 'guardian_', 'reason_'))]
+behavioral_features = ['freetime', 'goout', 'walc', 'dalc', 'romantic']
+support_features = ['internet', 'paid', 'nursery', 'higher', 'activities', 'schoolsup']
+
+#A dictionary that holds the different subsets of data
+#Going to be used to create clusters/kmeans model on related student features
+#Did this to improve silhouette scores
+subsets = {
+    'Academic': academic_features,
+    'Family': family_features,
+    'Behavioral': behavioral_features,
+    'Support': support_features
+}
+
+for name, features in subsets.items():
+    cluster_subset(df, features, name)
 
 
-# Set target to predict G3 (final grade)
-X = df[features]
-y = df['g3']
-
-###############################
-### Train a model to predict student performance
-# Split into train/test
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-# Scale features
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-# Train model
-model = RandomForestRegressor(random_state=42)
-model.fit(X_train_scaled, y_train)
-
-# Predict and evaluate
-#Reference for this: chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://repositorium.sdum.uminho.pt/bitstream/1822/8024/1/student.pdf
-y_pred = model.predict(X_test_scaled)
-mse = mean_squared_error(y_test, y_pred)
-r2 = r2_score(y_test, y_pred)
-
-print(f"Mean Squared Error: {mse:.2f}")
-print(f"R² Score: {r2:.2f}")
-
-#Scale the data because of different ranges of the data. Without this, the data with high ranges will be prioritized.
-X = df[[f for f in features if f not in ['g1', 'g2']]]
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-### Elbow Method to Determine k #####
-
-wcss = [] # List to store the Within-Cluster Sum of Squares (WCSS) for each k
-k_values = range(1, 11) #different k ranges to be used
-
-for k in k_values:
-    kmeans = KMeans(n_clusters=k, init='k-means++', random_state=42)
-    kmeans.fit(X_scaled) #scale the data to the kluster
-    wcss.append(kmeans.inertia_) #append the calculated intertia to the list (how tight are the clusters)
-
-plt.figure(figsize=(8, 5))
-plt.plot(k_values, wcss, 'bo-') #plot the num clutsers vs wcss (elbow)
-plt.xlabel('Number of Clusters (k)')
-plt.ylabel('WCSS')
-plt.title('Elbow Method for Optimal k')
-plt.grid(True)
-plt.show()
-
-##### K-Means Clustering + PCA Visualization ####
-kmeans = KMeans(n_clusters=3, random_state=42) #generate the model
-df['cluster'] = kmeans.fit_predict(X_scaled) #fit the model the data
-
-#This code was derived from: https://www.geeksforgeeks.org/principal-component-analysis-with-python/
-#Also used: https://setosa.io/ev/principal-component-analysis/
-#Drop some non-critical features (only plots 2 and 3 principle data (0-1, 1=2, 2=3)
-pca = PCA(n_components=2) 
-pca_result = pca.fit_transform(X_scaled)
-df['pca1'] = pca_result[:, 0]
-df['pca2'] = pca_result[:, 1]
-
-#plot the clusters
-#Uses seaborn to create a scatterplot
-plt.figure(figsize=(10, 6))
-sns.scatterplot(data=df, x='pca1', y='pca2', hue='cluster', palette='Set1')
-plt.title("K-Means Clusters (Visualized with PCA)")
-plt.xlabel("PCA 1")
-plt.ylabel("PCA 2")
-plt.legend(title='Cluster')
-plt.show()
+##Clustering all the features
+full_features = academic_features + family_features + behavioral_features + support_features #combine all features
+cluster_subset(df, full_features, "AllFeatures", k=3) #Call clustering functions on all features list
 
 
-#Look at average g3 per cluster
-cluster_g3_avg = df.groupby('cluster')['g3'].mean()
-print("Average G3 per cluster:\n", cluster_g3_avg)
 
-#Look at different features by cluster
-cluster_summary = df.groupby('cluster')[features + ['g3']].mean()
-print("Cluster Feature Summary:\n", cluster_summary)
 
-#Box plot of clusters per g3
-plt.figure(figsize=(8, 5))
-sns.boxplot(data=df, x='cluster', y='g3', palette='Set2')
-plt.title('G3 (Final Grade) Distribution per Cluster')
-plt.xlabel('Cluster')
-plt.ylabel('Final Grade (G3)')
-plt.show()
